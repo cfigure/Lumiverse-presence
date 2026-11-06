@@ -11,7 +11,7 @@ const POS_KEY = 'shared_presence.position'
 const HEARTBEAT_MS = 20_000
 
 type Peer = { id: string; nickname: string; editing: string | null }
-type PresetSave = { name: string; revision?: number; summary: string[]; compared: boolean }
+type PresetSave = { name: string; detail: string }
 
 function readNickname(): string | null {
   try { return localStorage.getItem(NICK_KEY) } catch { return null }
@@ -220,8 +220,10 @@ export function setup(ctx: SpindleFrontendContext) {
     .shared-presence .sp-peer + .sp-peer::before { content: " · "; opacity: .5; }
     .shared-presence .sp-editing { opacity: .7; font-size: 11px; }
     .shared-presence .sp-me { opacity: .55; }
-    .shared-presence .sp-save { border-top: 1px solid var(--lumiverse-border, rgba(255,255,255,.12)); margin-top: 5px; padding-top: 5px; }
-    .shared-presence .sp-summary { display: block; opacity: .75; font-size: 11px; }
+    .shared-presence .sp-save {
+      border-top: 1px solid var(--lumiverse-border, rgba(255,255,255,.12));
+      margin-top: 5px; padding-top: 5px; opacity: .75; font-size: 11px;
+    }
     .shared-presence .sp-rename {
       all: unset; cursor: pointer; opacity: .5; font-size: 11px; margin-left: 2px;
     }
@@ -243,16 +245,12 @@ export function setup(ctx: SpindleFrontendContext) {
         <span class="sp-dot alone"></span><span class="sp-peers"></span>
         <button type="button" class="sp-rename" title="Change your nickname" aria-label="Change your nickname">✎</button>
       </div>
-      <div class="sp-save" aria-live="polite" hidden>
-        <strong class="sp-save-title"></strong><span class="sp-summary"></span>
-      </div>
+      <div class="sp-save" aria-live="polite" hidden></div>
     </div>`
   const pill = widget.root.querySelector<HTMLElement>('.shared-presence')!
   const dot = pill.querySelector<HTMLElement>('.sp-dot')!
   const peerList = pill.querySelector<HTMLElement>('.sp-peers')!
   const saveLine = pill.querySelector<HTMLElement>('.sp-save')!
-  const saveTitle = pill.querySelector<HTMLElement>('.sp-save-title')!
-  const saveSummary = pill.querySelector<HTMLElement>('.sp-summary')!
 
   let peers: Peer[] = []
   let rosterKnown = false
@@ -286,11 +284,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
     saveLine.hidden = !latestSave
     if (latestSave) {
-      const { name, revision, summary, compared } = latestSave
-      const title = `${name} saved${revision === undefined ? '' : ` · rev ${revision}`}`
-      const detail = summary.join(' · ') || (compared ? 'No tracked changes' : 'Change details unavailable')
-      if (saveTitle.textContent !== title) saveTitle.textContent = title
-      if (saveSummary.textContent !== detail) saveSummary.textContent = detail
+      saveLine.title = latestSave.name
+      if (saveLine.textContent !== latestSave.detail) saveLine.textContent = latestSave.detail
     }
     fitWidget()
   }

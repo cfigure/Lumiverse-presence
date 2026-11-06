@@ -17,8 +17,7 @@ type PresetSave = {
   presetId: string
   name: string
   revision?: number
-  summary: string[]
-  compared: boolean
+  detail: string
 }
 
 type Account = {
@@ -210,12 +209,14 @@ spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
     account.lastRows.delete(presetId)
   }
 
-  const save = { presetId, name, revision, summary, compared }
+  const changes = summary.join(' · ')
+  const detail = changes
+    ? changes.charAt(0).toUpperCase() + changes.slice(1)
+    : compared ? 'Preset saved · no tracked changes' : 'Preset saved · change details unavailable'
+  const save = { presetId, name, revision, detail }
   account.latestSave = save
   spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
-  const rev = typeof revision === 'number' ? ` (rev ${revision})` : ''
-  const what = summary.length ? `: ${summary.join('; ')}` : ''
-  spindle.toast.info(`${name} saved${rev}${what}. Reload if you have it open.`, {
+  spindle.toast.info(detail, {
     title: 'Shared Presence',
     duration: summary.length ? 10000 : 7000,
     userId,

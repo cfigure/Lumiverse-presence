@@ -19,14 +19,14 @@ routing. Each roster and save summary is scoped to its Lumiverse account.
 - First load asks for a nickname (stored per browser). Use your usual nickname
   when switching browsers. Click ✎ on the pill to change it.
 - The pill lists other connected sessions under the same account. Drag it anywhere.
-- When a preset is saved, a toast and the pill show the preset name, revision,
-  and which blocks were edited, added, removed, or reordered. The summary also
-  reports changes such as sampler settings and prompt behaviour. The pill keeps
-  the latest summary while the extension backend is running, including when a
-  browser reconnects.
-- A detailed summary requires two consecutive saved revisions. With `presets`
-  granted, the backend loads a baseline when a browser joins. When a baseline
-  is unavailable, the pill shows the save with “Change details unavailable.”
+- When a preset is saved, a toast and the pill show which blocks were edited,
+  added, removed, or reordered, along with changes such as sampler settings and
+  prompt behaviour. Hover over the summary in the pill to see the preset name.
+  The pill keeps the latest summary while the extension backend is running,
+  including when a browser reconnects.
+- The summary compares the new save with the preceding saved version. With
+  `presets` granted, the backend loads a baseline when a browser joins. When a
+  baseline is unavailable, the pill shows “Preset saved · change details unavailable.”
 
 ## Optional
 
