@@ -20,8 +20,9 @@ user-scoped to that account.
 - The pill lists other connected sessions under the same account. Drag it anywhere.
 - When anyone saves a preset, everyone gets a toast with the preset name, new
   revision, and what changed (which blocks were edited/added/removed, reordering,
-  sampler settings). The first save after the server restarts only says "saved",
-  since there is nothing to diff against yet. The saver sees it too; ignore your own.
+  sampler settings, prompt behaviour…). With `presets` granted the baseline is
+  loaded at startup; without it, the first save after a restart only says "saved".
+  The saver sees it too; ignore your own.
 
 ## Optional
 

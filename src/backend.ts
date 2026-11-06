@@ -138,13 +138,36 @@ function describeChanges(prev: AnyPreset, next: AnyPreset): string[] {
   if (prev.name !== next.name) out.push(`renamed to '${String(next.name).slice(0, 40)}'`)
   if (!same(prev.parameters, next.parameters)) out.push('sampler/model parameters')
 
-  const pm: AnyPreset = prev.metadata ?? {}, nm: AnyPreset = next.metadata ?? {}
-  const metaKeys = new Set([...Object.keys(pm), ...Object.keys(nm)])
-  const changedMeta = [...metaKeys].filter((k) => !same(pm[k], nm[k]))
-  if (changedMeta.length) out.push(changedMeta.slice(0, 4).join(', ') + (changedMeta.length > 4 ? ', …' : ''))
+  // Loom spreads its other editor sections across two JSON bags; name the keys that moved.
+  const changedKeys = (a: AnyPreset, b: AnyPreset) =>
+    [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].filter((k) => !same(a?.[k], b?.[k]))
+  const changed = [...changedKeys(prev.prompts, next.prompts), ...changedKeys(prev.metadata, next.metadata)]
+  if (changed.length) out.push(changed.slice(0, 4).join(', ') + (changed.length > 4 ? ', …' : ''))
 
   return out
 }
+
+// Seed baselines at startup (needs the `presets` permission; silently skipped
+// without it, in which case the first save after a restart just says "saved").
+async function seedBaselines() {
+  try {
+    const api = (spindle as any).presets
+    if (!api?.list) return
+    let offset = 0
+    for (;;) {
+      const page = await api.list({ limit: 100, offset })
+      const rows: AnyPreset[] = page?.data ?? []
+      for (const row of rows) if (row?.id && !lastRows.has(row.id)) lastRows.set(row.id, row)
+      offset += rows.length
+      if (!rows.length || offset >= (page?.total ?? 0)) break
+    }
+    spindle.log.info(`Seeded ${lastRows.size} preset baseline(s) for change summaries`)
+  } catch (err: any) {
+    spindle.log.info(`Baseline seed skipped: ${err?.message ?? err}`)
+  }
+}
+void seedBaselines()
+try { (spindle as any).permissions?.onChanged?.((p: any) => { if (p?.permission === 'presets' && p?.granted) void seedBaselines() }) } catch { /* older host */ }
 
 spindle.on('PRESET_CHANGED', (payload: any) => {
   const preset: AnyPreset | null = payload?.preset ?? null

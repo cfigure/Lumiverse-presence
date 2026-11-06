@@ -86,6 +86,7 @@ class EditingTracker {
   private lastDraft: AnyPreset | null = null
   private lastPresetId: string | null = null
   private lastBlock: string | null = null
+  private lastBlockAt = 0
   private unsub: (() => void) | null = null
   onChange: (() => void) | null = null
 
@@ -127,12 +128,31 @@ class EditingTracker {
     for (const b of nextBlocks) {
       const p = prevById.get(String(b.id))
       if (!p || BLOCK_FIELDS.some((f) => !same(p[f], b[f]))) {
-        this.lastBlock = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 40) : '(unnamed block)'
+        this.lastBlock = `'${typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 40) : '(unnamed block)'}'`
+        this.lastBlockAt = Date.now()
         return
       }
     }
-    if (!same(prev.samplerOverrides, draft.samplerOverrides) || !same(prev.parameters, draft.parameters)) this.lastBlock = 'sampler settings'
-    else if (!same(prev.promptVariables, draft.promptVariables)) this.lastBlock = 'prompt variables'
+    if (!same(prev.samplerOverrides, draft.samplerOverrides) || !same(prev.parameters, draft.parameters)) { this.lastBlock = 'sampler settings'; this.lastBlockAt = Date.now() }
+    else if (!same(prev.promptVariables, draft.promptVariables)) { this.lastBlock = 'prompt variables'; this.lastBlockAt = Date.now() }
+  }
+
+  /**
+   * Which block is open in Loom's block editor right now. Loom only commits a
+   * block to the draft when you save/back out of it, so the draft diff alone
+   * can't see a block you're still inside; the editor's mount point can.
+   */
+  private openBlockName(): string | null {
+    try {
+      const el = document.querySelector<HTMLElement>('[data-spindle-scope^="loom-block:"]')
+      const scope = el?.getAttribute('data-spindle-scope') ?? ''
+      const id = scope.split(':')[1]
+      if (!id) return null
+      const blocks: AnyPreset[] = this.state()?.preset?.blocks ?? []
+      const b = blocks.find((x) => String(x.id) === id)
+      const name = typeof b?.name === 'string' && b.name.trim() ? b.name.trim() : null
+      return (name ?? '(unnamed block)').slice(0, 40)
+    } catch { return null }
   }
 
   /** "Sola" / "Sola › 'Jailbreak'" / null when the editor is closed or unavailable. */
@@ -140,7 +160,11 @@ class EditingTracker {
     const state = this.state()
     if (!state?.open || !state.preset?.name) return null
     const name = String(state.preset.name).slice(0, 40)
-    return this.lastBlock ? `${name} \u203a ${this.lastBlock}` : name
+    const open = this.openBlockName()
+    if (open) return `${name} \u203a '${open}'`
+    if (state.activeTabId && state.activeTabId !== 'preset') return `${name} \u203a ${String(state.activeTabId).slice(0, 30)} tab`
+    const recent = this.lastBlock && Date.now() - this.lastBlockAt < 90_000
+    return recent ? `${name} \u203a ${this.lastBlock}` : name
   }
 
   destroy() { try { this.unsub?.() } catch { /* ignore */ } this.unsub = null }
@@ -276,11 +300,18 @@ export function setup(ctx: SpindleFrontendContext) {
     })
   }
   const timer = window.setInterval(() => send('presence_heartbeat'), HEARTBEAT_MS)
+  const editPoll = window.setInterval(() => {
+    if (!announced) return
+    let now: string | null = null
+    try { now = tracker.describe() } catch { now = null }
+    if (now !== lastEditing) send('presence_heartbeat')
+  }, 2000)
   const onHide = () => send('presence_bye')
   window.addEventListener('pagehide', onHide)
 
   return () => {
     window.clearInterval(timer)
+    window.clearInterval(editPoll)
     if (editTimer) window.clearTimeout(editTimer)
     tracker.destroy()
     window.removeEventListener('pagehide', onHide)
