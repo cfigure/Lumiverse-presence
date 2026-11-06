@@ -59,7 +59,9 @@ function askNickname(ctx: SpindleFrontendContext, current: string | null): Promi
       ariaLabel: 'Nickname',
     })
 
-    const submit = () => { const v = input.getValue(); modal.dismiss(); finish(v) }
+    // Resolve BEFORE dismissing: dismiss() fires onDismiss synchronously, which
+    // would otherwise settle the promise with "no answer" first.
+    const submit = () => { finish(input.getValue()); modal.dismiss() }
     modal.root.querySelector<HTMLButtonElement>('.sp-modal-ok')?.addEventListener('click', submit)
     inputHost.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit() } })
     modal.onDismiss(() => { input.destroy(); finish(null) })
@@ -156,7 +158,10 @@ export function setup(ctx: SpindleFrontendContext) {
     if (pill) widget.setSize(Math.min(pill.offsetWidth + 2, 480), 32)
   }
 
+  let announced = false   // don't heartbeat as "someone" while the name modal is still open
   const send = (type: 'presence_hello' | 'presence_heartbeat' | 'presence_bye') => {
+    if (type === 'presence_hello') announced = true
+    if (type === 'presence_heartbeat' && !announced) return
     ctx.sendToBackend({ type, nickname, editing: currentlyEditing(ctx) })
   }
 
