@@ -72,7 +72,7 @@ spindle.onFrontendMessage((payload: any, userId, frontendSessionId) => {
       const changed = !prev || prev.nickname !== next.nickname || prev.editing !== next.editing
       if (!prev) {
         spindle.log.info(`${next.nickname} connected (${frontendSessionId.slice(0, 8)})`)
-        spindle.toast.info(`${next.nickname} is online`, { title: 'Shared Presence', duration: 4000, userId })
+        spindle.toast.info(`${next.nickname} is online`, { duration: 4000, userId })
         void seedBaselines(userId, account)
       }
       // A quiet heartbeat still gets a snapshot to recover a missed update.
@@ -217,7 +217,6 @@ spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
   account.latestSave = save
   spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
   spindle.toast.info(detail, {
-    title: 'Shared Presence',
     duration: summary.length ? 10000 : 7000,
     userId,
   })
