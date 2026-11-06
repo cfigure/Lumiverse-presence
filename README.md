@@ -7,8 +7,8 @@ so the other editor knows to reload before continuing.
 ## Install
 
 Lumiverse → Extensions → *Install from Source* → paste
-`https://github.com/cfigure/Lumiverse-presence`, then enable it. Only the
-auto-granted `ui_panels` permission is needed. Lumiverse builds `src/` itself if
+`https://github.com/cfigure/Lumiverse-presence`, then enable it. `ui_panels`
+is auto-granted; `presets` is privileged and optional (see below). Lumiverse builds `src/` itself if
 `dist/` is missing.
 
 Install it while logged in as the shared account so the extension is

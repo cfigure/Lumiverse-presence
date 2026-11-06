@@ -97,19 +97,24 @@ class EditingTracker {
     try { return (this.ctx.ui as any)?.presetEditor ?? null } catch { return null }
   }
 
+  /** getState() can throw when the `presets` grant is missing or still propagating. */
+  private state(): any {
+    try { return this.editor()?.getState?.() ?? null } catch { return null }
+  }
+
   /** Subscribe to draft changes if the helper is available; safe to call repeatedly. */
   tryAttach() {
     if (this.unsub) return
     const ed = this.editor()
     if (!ed?.onChange) return
     try {
-      this.unsub = ed.onChange(() => { this.observe(); this.onChange?.() })
+      this.unsub = ed.onChange(() => { try { this.observe() } catch { /* ignore */ } this.onChange?.() })
       this.observe()
     } catch { this.unsub = null }
   }
 
   private observe() {
-    const state = this.editor()?.getState?.()
+    const state = this.state()
     if (!state?.open || !state.preset) { this.lastDraft = null; this.lastPresetId = null; this.lastBlock = null; return }
     const draft: AnyPreset = state.preset
     if (state.presetId !== this.lastPresetId) { this.lastPresetId = state.presetId; this.lastBlock = null; this.lastDraft = draft; return }
@@ -132,7 +137,7 @@ class EditingTracker {
 
   /** "Sola" / "Sola › 'Jailbreak'" / null when the editor is closed or unavailable. */
   describe(): string | null {
-    const state = this.editor()?.getState?.()
+    const state = this.state()
     if (!state?.open || !state.preset?.name) return null
     const name = String(state.preset.name).slice(0, 40)
     return this.lastBlock ? `${name} \u203a ${this.lastBlock}` : name
@@ -225,8 +230,11 @@ export function setup(ctx: SpindleFrontendContext) {
   const send = (type: 'presence_hello' | 'presence_heartbeat' | 'presence_bye') => {
     if (type === 'presence_hello') announced = true
     if (type === 'presence_heartbeat' && !announced) return
-    tracker.tryAttach()   // permission may have been granted after load
-    const editing = tracker.describe()
+    let editing: string | null = null
+    try {
+      tracker.tryAttach()   // permission may have been granted after load
+      editing = tracker.describe()
+    } catch { editing = null }
     lastEditing = editing
     ctx.sendToBackend({ type, nickname, editing })
   }

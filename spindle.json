@@ -1,12 +1,12 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.2",
   "name": "Shared Presence",
   "identifier": "shared_presence",
   "author": "cfigure",
   "github": "https://github.com/cfigure/Lumiverse-presence",
   "homepage": "https://github.com/cfigure/Lumiverse-presence",
   "description": "Shows who else is logged into this account right now, and announces preset saves so the other editor knows to reload.",
-  "permissions": ["ui_panels"],
+  "permissions": ["ui_panels", "presets"],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js"
 }
