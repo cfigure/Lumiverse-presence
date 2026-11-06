@@ -250,7 +250,7 @@ spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
   const save = { presetId, name, revision, savedAt, detail }
   account.latestSave = save
   spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
-  spindle.toast.info(changes ? detail : `Preset saved · ${detail.toLowerCase()}`, {
+  spindle.toast.info(changes ? detail : `Preset saved · ${detail.toLowerCase()}` — reload if you have it open., {
     duration: summary.length ? 10000 : 7000,
     userId,
   })
