@@ -1,0 +1,12 @@
+{
+  "name": "lumiverse-presence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/backend.ts --outdir dist --target bun && bun build src/frontend.ts --outdir dist --target browser --format esm"
+  },
+  "devDependencies": {
+    "lumiverse-spindle-types": "latest"
+  }
+}
