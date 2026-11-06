@@ -18,13 +18,16 @@ user-scoped to that account.
 
 - First load asks for a nickname (stored per browser). Click ✎ on the pill to change it.
 - The pill lists other connected sessions under the same account. Drag it anywhere.
-- When anyone saves a preset, everyone gets a toast with the preset name and new
-  revision. The saver sees it too; ignore your own.
+- When anyone saves a preset, everyone gets a toast with the preset name, new
+  revision, and what changed (which blocks were edited/added/removed, reordering,
+  sampler settings). The first save after the server restarts only says "saved",
+  since there is nothing to diff against yet. The saver sees it too; ignore your own.
 
 ## Optional
 
 Grant the privileged `presets` permission and the pill also shows which preset
-each person has open. Without it, presence still works.
+each person has open and the block they last changed, e.g.
+`Pyro · editing Sola › 'Jailbreak'`. Without it, presence still works.
 
 ## Local build
 

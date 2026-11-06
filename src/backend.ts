@@ -87,22 +87,86 @@ spindle.on('FRONTEND_SESSION_CLOSED', (payload: any) => {
   }
 })
 
-// A preset was saved by *someone* on this account. The payload is documented as
-// { presetId } but the staging server sends { id, preset } with the full row,
-// so read both shapes.
+// ── Save announcements with a "what changed" summary ────────────────────────
+//
+// PRESET_CHANGED is documented as { presetId } but the staging server sends
+// { id, preset } with the full row, so read both shapes. Blocks live in
+// `prompt_order`; sampler/model settings in `parameters`; everything else the
+// editor saves (samplerOverrides, promptVariables, …) lands in `metadata`.
+
+type AnyPreset = Record<string, any>
+const lastRows = new Map<string, AnyPreset>()   // presetId -> last row we saw
+
+const BLOCK_FIELDS = ['name', 'content', 'role', 'enabled', 'position', 'depth', 'marker', 'group', 'injectionTrigger', 'variables'] as const
+
+function same(a: unknown, b: unknown): boolean {
+  try { return JSON.stringify(a) === JSON.stringify(b) } catch { return a === b }
+}
+
+function blockLabel(b: AnyPreset): string {
+  const name = typeof b?.name === 'string' && b.name.trim() ? b.name.trim() : '(unnamed block)'
+  return `'${name.slice(0, 40)}'`
+}
+
+/** Human summary of what differs between two saved rows; empty if nothing we track changed. */
+function describeChanges(prev: AnyPreset, next: AnyPreset): string[] {
+  const out: string[] = []
+
+  const prevBlocks: AnyPreset[] = Array.isArray(prev.prompt_order) ? prev.prompt_order : []
+  const nextBlocks: AnyPreset[] = Array.isArray(next.prompt_order) ? next.prompt_order : []
+  const prevById = new Map(prevBlocks.map((b) => [String(b.id), b]))
+  const nextById = new Map(nextBlocks.map((b) => [String(b.id), b]))
+
+  const edited: string[] = [], added: string[] = [], removed: string[] = []
+  for (const [id, b] of nextById) {
+    const p = prevById.get(id)
+    if (!p) { added.push(blockLabel(b)); continue }
+    if (BLOCK_FIELDS.some((f) => !same(p[f], b[f]))) edited.push(blockLabel(b))
+  }
+  for (const [id, b] of prevById) if (!nextById.has(id)) removed.push(blockLabel(b))
+
+  const prevOrder = prevBlocks.map((b) => String(b.id)).filter((id) => nextById.has(id))
+  const nextOrder = nextBlocks.map((b) => String(b.id)).filter((id) => prevById.has(id))
+  const reordered = !same(prevOrder, nextOrder)
+
+  const list = (xs: string[]) => xs.length > 3 ? `${xs.slice(0, 3).join(', ')} +${xs.length - 3} more` : xs.join(', ')
+  if (edited.length) out.push(`edited ${list(edited)}`)
+  if (added.length) out.push(`added ${list(added)}`)
+  if (removed.length) out.push(`removed ${list(removed)}`)
+  if (reordered) out.push('reordered blocks')
+
+  if (prev.name !== next.name) out.push(`renamed to '${String(next.name).slice(0, 40)}'`)
+  if (!same(prev.parameters, next.parameters)) out.push('sampler/model parameters')
+
+  const pm: AnyPreset = prev.metadata ?? {}, nm: AnyPreset = next.metadata ?? {}
+  const metaKeys = new Set([...Object.keys(pm), ...Object.keys(nm)])
+  const changedMeta = [...metaKeys].filter((k) => !same(pm[k], nm[k]))
+  if (changedMeta.length) out.push(changedMeta.slice(0, 4).join(', ') + (changedMeta.length > 4 ? ', …' : ''))
+
+  return out
+}
+
 spindle.on('PRESET_CHANGED', (payload: any) => {
-  const preset = payload?.preset ?? null
+  const preset: AnyPreset | null = payload?.preset ?? null
   const presetId: string | undefined = payload?.id ?? payload?.presetId ?? preset?.id
   const name: string = preset?.name ?? 'A preset'
   const revision: number | undefined = preset?.cache_revision
 
+  let summary: string[] = []
+  if (preset && presetId) {
+    const prev = lastRows.get(presetId)
+    if (prev) summary = describeChanges(prev, preset)
+    lastRows.set(presetId, preset)
+  }
+
   if (ownerUserId) {
-    spindle.sendToFrontend({ type: 'preset_saved', presetId, name, revision }, ownerUserId)
+    spindle.sendToFrontend({ type: 'preset_saved', presetId, name, revision, summary }, ownerUserId)
   }
   const rev = typeof revision === 'number' ? ` (rev ${revision})` : ''
-  spindle.toast.info(`${name} was saved${rev}. If you have it open, reload before editing further.`, {
+  const what = summary.length ? `: ${summary.join('; ')}` : ''
+  spindle.toast.info(`${name} saved${rev}${what}. Reload if you have it open.`, {
     title: 'Shared Presence',
-    duration: 8000,
+    duration: summary.length ? 10000 : 7000,
   })
 })
 

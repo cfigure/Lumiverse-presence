@@ -68,16 +68,77 @@ function askNickname(ctx: SpindleFrontendContext, current: string | null): Promi
   })
 }
 
-// Best effort: if the host exposes the preset editor state (needs the
-// privileged `presets` permission), report which preset is open. Without it
-// this silently returns null and presence still works.
-function currentlyEditing(ctx: SpindleFrontendContext): string | null {
-  try {
-    const editor = (ctx.ui as any)?.presetEditor
-    const state = editor?.getState?.()
-    if (state?.open && state?.preset?.name) return String(state.preset.name)
-  } catch { /* permission not granted */ }
-  return null
+// ── "What are they working on" ─────────────────────────────────────────────
+//
+// With the privileged `presets` permission the host exposes the Loom editor's
+// live draft. We watch it and remember the last block whose fields changed, so
+// the pill can say "editing Sola › 'Jailbreak'". Without the permission every
+// call throws and we quietly report nothing.
+
+type AnyPreset = Record<string, any>
+const BLOCK_FIELDS = ['name', 'content', 'role', 'enabled', 'position', 'depth', 'marker', 'group'] as const
+
+function same(a: unknown, b: unknown): boolean {
+  try { return JSON.stringify(a) === JSON.stringify(b) } catch { return a === b }
+}
+
+class EditingTracker {
+  private lastDraft: AnyPreset | null = null
+  private lastPresetId: string | null = null
+  private lastBlock: string | null = null
+  private unsub: (() => void) | null = null
+  onChange: (() => void) | null = null
+
+  constructor(private ctx: SpindleFrontendContext) {
+    this.tryAttach()
+  }
+
+  private editor(): any {
+    try { return (this.ctx.ui as any)?.presetEditor ?? null } catch { return null }
+  }
+
+  /** Subscribe to draft changes if the helper is available; safe to call repeatedly. */
+  tryAttach() {
+    if (this.unsub) return
+    const ed = this.editor()
+    if (!ed?.onChange) return
+    try {
+      this.unsub = ed.onChange(() => { this.observe(); this.onChange?.() })
+      this.observe()
+    } catch { this.unsub = null }
+  }
+
+  private observe() {
+    const state = this.editor()?.getState?.()
+    if (!state?.open || !state.preset) { this.lastDraft = null; this.lastPresetId = null; this.lastBlock = null; return }
+    const draft: AnyPreset = state.preset
+    if (state.presetId !== this.lastPresetId) { this.lastPresetId = state.presetId; this.lastBlock = null; this.lastDraft = draft; return }
+    const prev = this.lastDraft
+    this.lastDraft = draft
+    if (!prev) return
+    const prevBlocks: AnyPreset[] = Array.isArray(prev.blocks) ? prev.blocks : []
+    const nextBlocks: AnyPreset[] = Array.isArray(draft.blocks) ? draft.blocks : []
+    const prevById = new Map(prevBlocks.map((b) => [String(b.id), b]))
+    for (const b of nextBlocks) {
+      const p = prevById.get(String(b.id))
+      if (!p || BLOCK_FIELDS.some((f) => !same(p[f], b[f]))) {
+        this.lastBlock = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 40) : '(unnamed block)'
+        return
+      }
+    }
+    if (!same(prev.samplerOverrides, draft.samplerOverrides) || !same(prev.parameters, draft.parameters)) this.lastBlock = 'sampler settings'
+    else if (!same(prev.promptVariables, draft.promptVariables)) this.lastBlock = 'prompt variables'
+  }
+
+  /** "Sola" / "Sola › 'Jailbreak'" / null when the editor is closed or unavailable. */
+  describe(): string | null {
+    const state = this.editor()?.getState?.()
+    if (!state?.open || !state.preset?.name) return null
+    const name = String(state.preset.name).slice(0, 40)
+    return this.lastBlock ? `${name} \u203a ${this.lastBlock}` : name
+  }
+
+  destroy() { try { this.unsub?.() } catch { /* ignore */ } this.unsub = null }
 }
 
 function escapeHtml(s: string): string {
@@ -158,11 +219,26 @@ export function setup(ctx: SpindleFrontendContext) {
     if (pill) widget.setSize(Math.min(pill.offsetWidth + 2, 480), 32)
   }
 
+  const tracker = new EditingTracker(ctx)
+  let lastEditing: string | null | undefined = undefined
   let announced = false   // don't heartbeat as "someone" while the name modal is still open
   const send = (type: 'presence_hello' | 'presence_heartbeat' | 'presence_bye') => {
     if (type === 'presence_hello') announced = true
     if (type === 'presence_heartbeat' && !announced) return
-    ctx.sendToBackend({ type, nickname, editing: currentlyEditing(ctx) })
+    tracker.tryAttach()   // permission may have been granted after load
+    const editing = tracker.describe()
+    lastEditing = editing
+    ctx.sendToBackend({ type, nickname, editing })
+  }
+  // Push an update as soon as the block being edited changes (debounced), so
+  // the other side doesn't wait for the next heartbeat.
+  let editTimer: number | null = null
+  tracker.onChange = () => {
+    if (editTimer) window.clearTimeout(editTimer)
+    editTimer = window.setTimeout(() => {
+      editTimer = null
+      if (announced && tracker.describe() !== lastEditing) send('presence_heartbeat')
+    }, 1500)
   }
 
   const unsub = ctx.onBackendMessage((payload: any) => {
@@ -197,6 +273,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
   return () => {
     window.clearInterval(timer)
+    if (editTimer) window.clearTimeout(editTimer)
+    tracker.destroy()
     window.removeEventListener('pagehide', onHide)
     send('presence_bye')
     unsub()
