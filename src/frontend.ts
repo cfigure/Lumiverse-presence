@@ -25,10 +25,45 @@ function writePosition(pos: { x: number; y: number }) {
   try { localStorage.setItem(POS_KEY, JSON.stringify(pos)) } catch { /* ignore */ }
 }
 
-function askNickname(current: string | null): string {
-  const answer = window.prompt('Shared Presence — what should the other editor see you as?', current ?? '')
-  const nick = (answer ?? '').trim()
-  return nick || current || 'someone'
+// Themed host modal with a host text input. Resolves with the chosen name;
+// closing the modal keeps the current name (or 'someone' on first run).
+function askNickname(ctx: SpindleFrontendContext, current: string | null): Promise<string> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value: string | null) => {
+      if (settled) return
+      settled = true
+      const nick = (value ?? '').trim()
+      resolve(nick || current || 'someone')
+    }
+
+    let modal: ReturnType<typeof ctx.ui.showModal>
+    try {
+      modal = ctx.ui.showModal({ title: 'Who are you?', width: 360, persistent: current === null })
+    } catch {
+      // Modal stack full or host too old: last-resort fallback.
+      finish(window.prompt('What should the other editor see you as?', current ?? ''))
+      return
+    }
+
+    modal.root.innerHTML =
+      `<p class="sp-modal-help">The other person on this account will see this name next to the green dot.</p>` +
+      `<div class="sp-modal-input"></div>` +
+      `<div class="sp-modal-actions"><button type="button" class="sp-modal-ok">Save</button></div>`
+
+    const inputHost = modal.root.querySelector<HTMLElement>('.sp-modal-input')!
+    const input = ctx.components.mountTextInput(inputHost, {
+      value: current ?? '',
+      placeholder: 'Nickname',
+      autoFocus: true,
+      ariaLabel: 'Nickname',
+    })
+
+    const submit = () => { const v = input.getValue(); modal.dismiss(); finish(v) }
+    modal.root.querySelector<HTMLButtonElement>('.sp-modal-ok')?.addEventListener('click', submit)
+    inputHost.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit() } })
+    modal.onDismiss(() => { input.destroy(); finish(null) })
+  })
 }
 
 // Best effort: if the host exposes the preset editor state (needs the
@@ -48,10 +83,16 @@ function escapeHtml(s: string): string {
 }
 
 export function setup(ctx: SpindleFrontendContext) {
-  let nickname = readNickname()
-  if (!nickname) { nickname = askNickname(null); writeNickname(nickname) }
+  let nickname: string = readNickname() ?? 'someone'
 
   const removeStyle = ctx.dom.addStyle(`
+    .sp-modal-help { margin: 0 0 10px; font-size: 13px; color: var(--lumiverse-text-muted); }
+    .sp-modal-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+    .sp-modal-ok {
+      all: unset; cursor: pointer; padding: 6px 14px; border-radius: var(--lumiverse-radius, 8px);
+      background: var(--lumiverse-primary); color: var(--lumiverse-on-primary, #fff); font-size: 13px;
+    }
+    .sp-modal-ok:hover { filter: brightness(1.1); }
     .shared-presence {
       font: 12px/1.3 var(--lumiverse-font, system-ui, sans-serif);
       color: var(--lumiverse-text);
@@ -99,14 +140,16 @@ export function setup(ctx: SpindleFrontendContext) {
       ? others.map((p) =>
           `<span class="sp-peer"><b>${escapeHtml(p.nickname)}</b>${p.editing ? `<span class="sp-editing">editing ${escapeHtml(p.editing)}</span>` : ''}</span>`
         ).join('')
-      : `<span class="sp-peer sp-me">only you (${escapeHtml(nickname!)})</span>`
+      : `<span class="sp-peer sp-me">only you (${escapeHtml(nickname)})</span>`
     widget.root.innerHTML =
       `<div class="shared-presence"><span class="${dotClass}"></span>${parts}` +
       `<button class="sp-rename" title="Change your nickname">✎</button></div>`
     widget.root.querySelector<HTMLButtonElement>('.sp-rename')?.addEventListener('click', (e) => {
       e.stopPropagation()
-      nickname = askNickname(nickname); writeNickname(nickname!)
-      send('presence_hello')
+      void askNickname(ctx, nickname).then((nick) => {
+        nickname = nick; writeNickname(nick)
+        send('presence_hello')
+      })
     })
     // Width follows content so the pill doesn't clip long names.
     const pill = widget.root.querySelector<HTMLElement>('.shared-presence')
@@ -132,7 +175,17 @@ export function setup(ctx: SpindleFrontendContext) {
   })
 
   render()
-  send('presence_hello')
+  if (readNickname()) {
+    send('presence_hello')
+  } else {
+    // First run on this browser: ask before announcing, so the other side
+    // never sees "someone" flicker in.
+    void askNickname(ctx, null).then((nick) => {
+      nickname = nick; writeNickname(nick)
+      render()
+      send('presence_hello')
+    })
+  }
   const timer = window.setInterval(() => send('presence_heartbeat'), HEARTBEAT_MS)
   const onHide = () => send('presence_bye')
   window.addEventListener('pagehide', onHide)
