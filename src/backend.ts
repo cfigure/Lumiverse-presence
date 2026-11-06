@@ -17,6 +17,7 @@ type PresetSave = {
   presetId: string
   name: string
   revision?: number
+  savedAt: number
   detail: string
 }
 
@@ -101,12 +102,29 @@ spindle.on('FRONTEND_SESSION_CLOSED', (payload: any, userId?: string) => {
 //
 // PRESET_CHANGED is documented as { presetId } but the staging server sends
 // { id, preset } with the full row, so read both shapes. Blocks live in
-// `prompt_order`; sampler/model settings in `parameters`; everything else the
-// editor saves (samplerOverrides, promptVariables, …) lands in `metadata`.
+// `prompt_order`; sampler overrides in `parameters`; other editor settings in
+// `prompts` and `metadata`.
 
 type AnyPreset = Record<string, any>
 
-const BLOCK_FIELDS = ['name', 'content', 'role', 'enabled', 'position', 'depth', 'marker', 'group', 'injectionTrigger', 'variables'] as const
+const BLOCK_FIELD_LABELS = {
+  content: 'prompt text',
+  enabled: 'enabled state',
+  name: 'name',
+  role: 'role',
+  position: 'placement',
+  depth: 'depth',
+  marker: 'block type',
+  group: 'group',
+  categoryMode: 'category mode',
+  injectionTrigger: 'injection triggers',
+  characterTagTrigger: 'character tag triggers',
+  variables: 'variables',
+  placementBinding: 'variable-based placement',
+  isLocked: 'lock status',
+  color: 'colour',
+  stashId: 'stash link',
+}
 
 function same(a: unknown, b: unknown): boolean {
   try { return JSON.stringify(a) === JSON.stringify(b) } catch { return a === b }
@@ -115,6 +133,20 @@ function same(a: unknown, b: unknown): boolean {
 function blockLabel(b: AnyPreset): string {
   const name = typeof b?.name === 'string' && b.name.trim() ? b.name.trim() : '(unnamed block)'
   return `'${name.slice(0, 40)}'`
+}
+
+function shortList(items: string[], limit = 3): string {
+  const visible = items.slice(0, limit).join(', ')
+  return items.length > limit ? `${visible} +${items.length - limit} more` : visible
+}
+
+function changedKeys(before?: AnyPreset, after?: AnyPreset): string[] {
+  const keys = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])
+  return [...keys].filter((key) => !same(before?.[key], after?.[key]))
+}
+
+function settingLabel(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toLowerCase().slice(0, 40)
 }
 
 /** Human summary of what differs between two saved rows; empty if nothing we track changed. */
@@ -130,7 +162,12 @@ function describeChanges(prev: AnyPreset, next: AnyPreset): string[] {
   for (const [id, b] of nextById) {
     const p = prevById.get(id)
     if (!p) { added.push(blockLabel(b)); continue }
-    if (BLOCK_FIELDS.some((f) => !same(p[f], b[f]))) edited.push(blockLabel(b))
+    const fields = Object.entries(BLOCK_FIELD_LABELS)
+      .filter(([key]) => !same(p[key], b[key]))
+      .map(([key, label]) => key === 'enabled' && typeof b.enabled === 'boolean'
+        ? b.enabled ? 'enabled' : 'disabled'
+        : label)
+    if (fields.length) edited.push(`${blockLabel(b)} (${shortList(fields, 2)})`)
   }
   for (const [id, b] of prevById) if (!nextById.has(id)) removed.push(blockLabel(b))
 
@@ -138,23 +175,17 @@ function describeChanges(prev: AnyPreset, next: AnyPreset): string[] {
   const nextOrder = nextBlocks.map((b) => String(b.id)).filter((id) => prevById.has(id))
   const reordered = !same(prevOrder, nextOrder)
 
-  const list = (xs: string[]) => xs.length > 3 ? `${xs.slice(0, 3).join(', ')} +${xs.length - 3} more` : xs.join(', ')
-  if (edited.length) out.push(`edited ${list(edited)}`)
-  if (added.length) out.push(`added ${list(added)}`)
-  if (removed.length) out.push(`removed ${list(removed)}`)
+  if (edited.length) out.push(`edited ${shortList(edited, 2)}`)
+  if (added.length) out.push(`added ${shortList(added)}`)
+  if (removed.length) out.push(`removed ${shortList(removed)}`)
   if (reordered) out.push('reordered blocks')
 
   if (prev.name !== next.name) out.push(`renamed to '${String(next.name).slice(0, 40)}'`)
-  if (!same(prev.parameters, next.parameters)) out.push('sampler/model parameters')
-
-  // Loom spreads its other editor sections across two JSON bags; name the keys that moved.
-  const changedKeys = (a: AnyPreset, b: AnyPreset) =>
-    [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].filter((k) => !same(a?.[k], b?.[k]))
-  const changed = [...changedKeys(prev.prompts, next.prompts), ...changedKeys(prev.metadata, next.metadata)]
-  if (changed.length) {
-    const labels = changed.slice(0, 4).map((key) => key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().slice(0, 40))
-    out.push(labels.join(', ') + (changed.length > 4 ? ', …' : ''))
-  }
+  const samplers = changedKeys(prev.parameters?.samplerOverrides, next.parameters?.samplerOverrides)
+  const parameters = changedKeys(prev.parameters, next.parameters)
+    .filter((key) => key !== 'samplerOverrides' || samplers.length === 0)
+  const settings = [...samplers, ...parameters, ...changedKeys(prev.prompts, next.prompts), ...changedKeys(prev.metadata, next.metadata)]
+  if (settings.length) out.push(`changed settings (${shortList(settings.map(settingLabel))})`)
 
   return out
 }
@@ -212,11 +243,14 @@ spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
   const changes = summary.join(' · ')
   const detail = changes
     ? changes.charAt(0).toUpperCase() + changes.slice(1)
-    : compared ? 'Preset saved · no tracked changes' : 'Preset saved · change details unavailable'
-  const save = { presetId, name, revision, detail }
+    : compared ? 'No tracked changes' : 'Change details unavailable'
+  const savedAt = typeof preset?.updated_at === 'number' && Number.isFinite(preset.updated_at) && preset.updated_at > 0
+    ? preset.updated_at * 1000
+    : Date.now()
+  const save = { presetId, name, revision, savedAt, detail }
   account.latestSave = save
   spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
-  spindle.toast.info(detail, {
+  spindle.toast.info(changes ? detail : `Preset saved · ${detail.toLowerCase()}`, {
     duration: summary.length ? 10000 : 7000,
     userId,
   })
