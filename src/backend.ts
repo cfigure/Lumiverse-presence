@@ -13,24 +13,38 @@ type Peer = {
   lastSeen: number
 }
 
+type PresetSave = {
+  presetId: string
+  name: string
+  revision?: number
+  summary: string[]
+  compared: boolean
+}
+
+type Account = {
+  peers: Map<string, Peer>
+  lastRows: Map<string, AnyPreset>
+  latestSave: PresetSave | null
+  seeding: boolean
+}
+
 const STALE_MS = 60_000          // drop a peer if no heartbeat for this long
 const PRUNE_EVERY_MS = 15_000
 
-const peers = new Map<string, Peer>()   // frontendSessionId -> Peer
-let ownerUserId: string | null = null   // user-scoped extension: always the installer
+const accounts = new Map<string, Account>()
 
-function roster() {
-  return [...peers.entries()].map(([id, p]) => ({
-    id,
-    nickname: p.nickname,
-    editing: p.editing,
-    lastSeen: p.lastSeen,
-  }))
+function getAccount(userId: string): Account {
+  let account = accounts.get(userId)
+  if (!account) {
+    account = { peers: new Map(), lastRows: new Map(), latestSave: null, seeding: false }
+    accounts.set(userId, account)
+  }
+  return account
 }
 
-function broadcastRoster() {
-  if (!ownerUserId) return
-  spindle.sendToFrontend({ type: 'presence_roster', peers: roster() }, ownerUserId)
+function sendRoster(userId: string, account: Account, frontendSessionId?: string) {
+  const peers = [...account.peers].map(([id, { nickname, editing }]) => ({ id, nickname, editing }))
+  spindle.sendToFrontend({ type: 'presence_roster', peers, latestSave: account.latestSave }, userId, { frontendSessionId })
 }
 
 function cleanNickname(value: unknown): string {
@@ -39,12 +53,13 @@ function cleanNickname(value: unknown): string {
 }
 
 spindle.onFrontendMessage((payload: any, userId, frontendSessionId) => {
-  if (!frontendSessionId || !payload || typeof payload !== 'object') return
-  ownerUserId = userId
+  if (!userId || !frontendSessionId || !payload || typeof payload !== 'object') return
 
   switch (payload.type) {
     case 'presence_hello':
     case 'presence_heartbeat': {
+      const account = getAccount(userId)
+      const { peers } = account
       const prev = peers.get(frontendSessionId)
       const next: Peer = {
         nickname: cleanNickname(payload.nickname),
@@ -58,33 +73,29 @@ spindle.onFrontendMessage((payload: any, userId, frontendSessionId) => {
       const changed = !prev || prev.nickname !== next.nickname || prev.editing !== next.editing
       if (!prev) {
         spindle.log.info(`${next.nickname} connected (${frontendSessionId.slice(0, 8)})`)
-        // Tell everyone *else*; the newcomer gets the roster below anyway.
-        spindle.toast.info(`${next.nickname} is online`, { title: 'Shared Presence', duration: 4000 })
+        spindle.toast.info(`${next.nickname} is online`, { title: 'Shared Presence', duration: 4000, userId })
+        void seedBaselines(userId, account)
       }
-      if (changed || payload.type === 'presence_hello') broadcastRoster()
+      // A quiet heartbeat still gets a snapshot to recover a missed update.
+      sendRoster(userId, account, changed ? undefined : frontendSessionId)
       break
     }
 
-    case 'presence_bye': {
-      const prev = peers.get(frontendSessionId)
-      if (peers.delete(frontendSessionId)) {
-        spindle.log.info(`${prev?.nickname ?? 'someone'} left (${frontendSessionId.slice(0, 8)})`)
-        broadcastRoster()
-      }
+    case 'presence_bye':
+      removePeer(userId, frontendSessionId)
       break
-    }
   }
 })
 
+function removePeer(userId: string, id: string) {
+  const account = accounts.get(userId)
+  if (account?.peers.delete(id)) sendRoster(userId, account)
+}
+
 // The host tells us when a document's socket is gone (tab closed, reload, network drop).
-spindle.on('FRONTEND_SESSION_CLOSED', (payload: any) => {
+spindle.on('FRONTEND_SESSION_CLOSED', (payload: any, userId?: string) => {
   const id = payload?.frontendSessionId
-  if (typeof id !== 'string') return
-  const prev = peers.get(id)
-  if (peers.delete(id)) {
-    spindle.log.info(`${prev?.nickname ?? 'someone'} disconnected (${id.slice(0, 8)})`)
-    broadcastRoster()
-  }
+  if (userId && typeof id === 'string') removePeer(userId, id)
 })
 
 // ── Save announcements with a "what changed" summary ────────────────────────
@@ -95,7 +106,6 @@ spindle.on('FRONTEND_SESSION_CLOSED', (payload: any) => {
 // editor saves (samplerOverrides, promptVariables, …) lands in `metadata`.
 
 type AnyPreset = Record<string, any>
-const lastRows = new Map<string, AnyPreset>()   // presetId -> last row we saw
 
 const BLOCK_FIELDS = ['name', 'content', 'role', 'enabled', 'position', 'depth', 'marker', 'group', 'injectionTrigger', 'variables'] as const
 
@@ -142,65 +152,86 @@ function describeChanges(prev: AnyPreset, next: AnyPreset): string[] {
   const changedKeys = (a: AnyPreset, b: AnyPreset) =>
     [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].filter((k) => !same(a?.[k], b?.[k]))
   const changed = [...changedKeys(prev.prompts, next.prompts), ...changedKeys(prev.metadata, next.metadata)]
-  if (changed.length) out.push(changed.slice(0, 4).join(', ') + (changed.length > 4 ? ', …' : ''))
+  if (changed.length) {
+    const labels = changed.slice(0, 4).map((key) => key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().slice(0, 40))
+    out.push(labels.join(', ') + (changed.length > 4 ? ', …' : ''))
+  }
 
   return out
 }
 
-// Seed baselines at startup (needs the `presets` permission; silently skipped
-// without it, in which case the first save after a restart just says "saved").
-async function seedBaselines() {
+// The authenticated account is known when its first browser announces itself.
+async function seedBaselines(userId: string, account: Account) {
+  if (account.seeding || !spindle.permissions.has('presets')) return
+  account.seeding = true
   try {
-    const api = (spindle as any).presets
-    if (!api?.list) return
     let offset = 0
     for (;;) {
-      const page = await api.list({ limit: 100, offset })
-      const rows: AnyPreset[] = page?.data ?? []
-      for (const row of rows) if (row?.id && !lastRows.has(row.id)) lastRows.set(row.id, row)
-      offset += rows.length
-      if (!rows.length || offset >= (page?.total ?? 0)) break
+      const { data, total } = await spindle.presets.list({ limit: 100, offset, userId })
+      for (const row of data) if (!account.lastRows.has(row.id)) account.lastRows.set(row.id, row)
+      offset += data.length
+      if (!data.length || offset >= total) break
     }
-    spindle.log.info(`Seeded ${lastRows.size} preset baseline(s) for change summaries`)
-  } catch (err: any) {
-    spindle.log.info(`Baseline seed skipped: ${err?.message ?? err}`)
+  } catch (err) {
+    spindle.log.info(`Baseline seed skipped: ${String(err)}`)
+  } finally {
+    account.seeding = false
   }
 }
-void seedBaselines()
-try { (spindle as any).permissions?.onChanged?.((p: any) => { if (p?.permission === 'presets' && p?.granted) void seedBaselines() }) } catch { /* older host */ }
+spindle.permissions.onChanged(({ permission, granted }) => {
+  if (permission === 'presets' && granted) {
+    for (const [userId, account] of accounts) void seedBaselines(userId, account)
+  }
+})
 
-spindle.on('PRESET_CHANGED', (payload: any) => {
+spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
+  if (!userId) return
+  const account = getAccount(userId)
   const preset: AnyPreset | null = payload?.preset ?? null
   const presetId: string | undefined = payload?.id ?? payload?.presetId ?? preset?.id
-  const name: string = preset?.name ?? 'A preset'
-  const revision: number | undefined = preset?.cache_revision
+  if (typeof presetId !== 'string') return
 
+  const prev = account.lastRows.get(presetId)
+  const name = String(preset?.name ?? prev?.name ?? 'A preset').slice(0, 100)
+  const revision = typeof preset?.cache_revision === 'number' ? preset.cache_revision : undefined
+  const latest = account.latestSave
+  if (revision !== undefined && latest?.presetId === presetId && latest.revision === revision) return
+
+  let compared = false
   let summary: string[] = []
-  if (preset && presetId) {
-    const prev = lastRows.get(presetId)
-    if (prev) summary = describeChanges(prev, preset)
-    lastRows.set(presetId, preset)
+  if (preset) {
+    if (revision !== undefined && typeof prev?.cache_revision === 'number' && revision < prev.cache_revision) return
+    if (prev && revision !== undefined && prev.cache_revision === revision - 1) {
+      compared = true
+      summary = describeChanges(prev, preset)
+    }
+    account.lastRows.set(presetId, preset)
+  } else {
+    account.lastRows.delete(presetId)
   }
 
-  if (ownerUserId) {
-    spindle.sendToFrontend({ type: 'preset_saved', presetId, name, revision, summary }, ownerUserId)
-  }
+  const save = { presetId, name, revision, summary, compared }
+  account.latestSave = save
+  spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
   const rev = typeof revision === 'number' ? ` (rev ${revision})` : ''
   const what = summary.length ? `: ${summary.join('; ')}` : ''
   spindle.toast.info(`${name} saved${rev}${what}. Reload if you have it open.`, {
     title: 'Shared Presence',
     duration: summary.length ? 10000 : 7000,
+    userId,
   })
 })
 
 // Drop peers whose heartbeats stopped without a clean close.
 setInterval(() => {
   const cutoff = Date.now() - STALE_MS
-  let removed = false
-  for (const [id, p] of peers) {
-    if (p.lastSeen < cutoff) { peers.delete(id); removed = true }
+  for (const [userId, account] of accounts) {
+    let removed = false
+    for (const [id, p] of account.peers) {
+      if (p.lastSeen < cutoff) { account.peers.delete(id); removed = true }
+    }
+    if (removed) sendRoster(userId, account)
   }
-  if (removed) broadcastRoster()
 }, PRUNE_EVERY_MS)
 
 spindle.log.info('Shared Presence backend loaded')

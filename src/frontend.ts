@@ -10,7 +10,8 @@ const NICK_KEY = 'shared_presence.nickname'
 const POS_KEY = 'shared_presence.position'
 const HEARTBEAT_MS = 20_000
 
-type Peer = { id: string; nickname: string; editing: string | null; lastSeen: number }
+type Peer = { id: string; nickname: string; editing: string | null }
+type PresetSave = { name: string; revision?: number; summary: string[]; compared: boolean }
 
 function readNickname(): string | null {
   try { return localStorage.getItem(NICK_KEY) } catch { return null }
@@ -167,7 +168,13 @@ class EditingTracker {
     return recent ? `${name} \u203a ${this.lastBlock}` : name
   }
 
-  destroy() { try { this.unsub?.() } catch { /* ignore */ } this.unsub = null }
+  destroy() {
+    try { this.unsub?.() } catch { /* host may already have removed it */ }
+    this.unsub = null
+    this.lastDraft = null
+    this.lastPresetId = null
+    this.lastBlock = null
+  }
 }
 
 function escapeHtml(s: string): string {
@@ -175,7 +182,12 @@ function escapeHtml(s: string): string {
 }
 
 export function setup(ctx: SpindleFrontendContext) {
+  const { frontendSessionId, host } = ctx as SpindleFrontendContext & {
+    frontendSessionId?: string
+    host?: { extensionInstallationId: string }
+  }
   let nickname: string = readNickname() ?? 'someone'
+  let disposed = false
 
   const removeStyle = ctx.dom.addStyle(`
     .sp-modal-help { margin: 0 0 10px; font-size: 13px; color: var(--lumiverse-text-muted); }
@@ -190,22 +202,26 @@ export function setup(ctx: SpindleFrontendContext) {
       color: var(--lumiverse-text);
       background: var(--lumiverse-fill, rgba(20,20,24,.92));
       border: 1px solid var(--lumiverse-border, rgba(255,255,255,.12));
-      border-radius: 999px;
+      border-radius: 14px;
       padding: 6px 10px 6px 8px;
-      display: inline-flex; align-items: center; gap: 8px;
+      box-sizing: border-box;
+      width: max-content; max-width: min(420px, calc(100vw - 24px));
       box-shadow: 0 2px 10px rgba(0,0,0,.25);
-      user-select: none; cursor: grab; white-space: nowrap;
+      user-select: none; cursor: grab; overflow-wrap: anywhere;
     }
+    .shared-presence .sp-presence-line { display: flex; align-items: baseline; gap: 8px; }
+    .shared-presence .sp-peers { min-width: 0; }
     .shared-presence .sp-dot {
-      width: 8px; height: 8px; border-radius: 50%;
+      flex: 0 0 8px; height: 8px; border-radius: 50%;
       background: var(--lumiverse-success, #3fb950);
       box-shadow: 0 0 0 3px color-mix(in srgb, var(--lumiverse-success, #3fb950) 25%, transparent);
     }
     .shared-presence .sp-dot.alone { background: var(--lumiverse-text-muted, #888); box-shadow: none; }
-    .shared-presence .sp-peer { display: inline-flex; align-items: center; gap: 4px; }
-    .shared-presence .sp-peer + .sp-peer::before { content: "·"; opacity: .5; margin: 0 2px; }
+    .shared-presence .sp-peer + .sp-peer::before { content: " · "; opacity: .5; }
     .shared-presence .sp-editing { opacity: .7; font-size: 11px; }
     .shared-presence .sp-me { opacity: .55; }
+    .shared-presence .sp-save { border-top: 1px solid var(--lumiverse-border, rgba(255,255,255,.12)); margin-top: 5px; padding-top: 5px; }
+    .shared-presence .sp-summary { display: block; opacity: .75; font-size: 11px; }
     .shared-presence .sp-rename {
       all: unset; cursor: pointer; opacity: .5; font-size: 11px; margin-left: 2px;
     }
@@ -221,31 +237,62 @@ export function setup(ctx: SpindleFrontendContext) {
     chromeless: true,
   })
   widget.onDragEnd((pos) => writePosition(pos))
+  widget.root.innerHTML = `
+    <div class="shared-presence">
+      <div class="sp-presence-line">
+        <span class="sp-dot alone"></span><span class="sp-peers"></span>
+        <button type="button" class="sp-rename" title="Change your nickname" aria-label="Change your nickname">✎</button>
+      </div>
+      <div class="sp-save" aria-live="polite" hidden>
+        <strong class="sp-save-title"></strong><span class="sp-summary"></span>
+      </div>
+    </div>`
+  const pill = widget.root.querySelector<HTMLElement>('.shared-presence')!
+  const dot = pill.querySelector<HTMLElement>('.sp-dot')!
+  const peerList = pill.querySelector<HTMLElement>('.sp-peers')!
+  const saveLine = pill.querySelector<HTMLElement>('.sp-save')!
+  const saveTitle = pill.querySelector<HTMLElement>('.sp-save-title')!
+  const saveSummary = pill.querySelector<HTMLElement>('.sp-summary')!
 
   let peers: Peer[] = []
-  let mySessionId: string | null = null   // learned from the roster: the entry whose nickname matches and is newest
+  let rosterKnown = false
+  let latestSave: PresetSave | null = null
+  let previousPeers = ''
+  let previousWidth = 0
+  let previousHeight = 0
+
+  const fitWidget = () => {
+    const { offsetWidth, offsetHeight } = pill
+    if (!offsetWidth || !offsetHeight || (offsetWidth === previousWidth && offsetHeight === previousHeight)) return
+    previousWidth = offsetWidth
+    previousHeight = offsetHeight
+    widget.setSize(offsetWidth + 2, offsetHeight + 2)
+  }
+  const sizeObserver = new ResizeObserver(fitWidget)
+  sizeObserver.observe(pill)
 
   const render = () => {
-    const others = peers.filter((p) => p.id !== mySessionId)
-    const dotClass = others.length ? 'sp-dot' : 'sp-dot alone'
+    const others = peers.filter((p) => p.id !== frontendSessionId)
+    dot.classList.toggle('alone', !others.length)
     const parts = others.length
       ? others.map((p) =>
-          `<span class="sp-peer"><b>${escapeHtml(p.nickname)}</b>${p.editing ? `<span class="sp-editing">editing ${escapeHtml(p.editing)}</span>` : ''}</span>`
+          `<span class="sp-peer"><b>${escapeHtml(p.nickname)}</b>${p.editing ? `<span class="sp-editing"> · editing ${escapeHtml(p.editing)}</span>` : ''}</span>`
         ).join('')
-      : `<span class="sp-peer sp-me">only you (${escapeHtml(nickname)})</span>`
-    widget.root.innerHTML =
-      `<div class="shared-presence"><span class="${dotClass}"></span>${parts}` +
-      `<button class="sp-rename" title="Change your nickname">✎</button></div>`
-    widget.root.querySelector<HTMLButtonElement>('.sp-rename')?.addEventListener('click', (e) => {
-      e.stopPropagation()
-      void askNickname(ctx, nickname).then((nick) => {
-        nickname = nick; writeNickname(nick)
-        send('presence_hello')
-      })
-    })
-    // Width follows content so the pill doesn't clip long names.
-    const pill = widget.root.querySelector<HTMLElement>('.shared-presence')
-    if (pill) widget.setSize(Math.min(pill.offsetWidth + 2, 480), 32)
+      : `<span class="sp-peer sp-me">${rosterKnown ? `only you (${escapeHtml(nickname)})` : 'Connecting…'}</span>`
+    if (previousPeers !== parts) {
+      peerList.innerHTML = parts
+      previousPeers = parts
+    }
+
+    saveLine.hidden = !latestSave
+    if (latestSave) {
+      const { name, revision, summary, compared } = latestSave
+      const title = `${name} saved${revision === undefined ? '' : ` · rev ${revision}`}`
+      const detail = summary.join(' · ') || (compared ? 'No tracked changes' : 'Change details unavailable')
+      if (saveTitle.textContent !== title) saveTitle.textContent = title
+      if (saveSummary.textContent !== detail) saveSummary.textContent = detail
+    }
+    fitWidget()
   }
 
   const tracker = new EditingTracker(ctx)
@@ -262,6 +309,16 @@ export function setup(ctx: SpindleFrontendContext) {
     lastEditing = editing
     ctx.sendToBackend({ type, nickname, editing })
   }
+  pill.querySelector<HTMLButtonElement>('.sp-rename')?.addEventListener('click', (e) => {
+    e.stopPropagation()
+    void askNickname(ctx, nickname).then((nick) => {
+      if (disposed) return
+      nickname = nick
+      writeNickname(nick)
+      render()
+      send('presence_hello')
+    })
+  })
   // Push an update as soon as the block being edited changes (debounced), so
   // the other side doesn't wait for the next heartbeat.
   let editTimer: number | null = null
@@ -277,14 +334,21 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!payload || typeof payload !== 'object') return
     if (payload.type === 'presence_roster') {
       peers = Array.isArray(payload.peers) ? payload.peers : []
-      // Identify "me": the newest roster entry carrying my nickname. Good enough
-      // for two people; a second tab of your own will show as a peer, which is
-      // actually useful.
-      const mine = peers.filter((p) => p.nickname === nickname).sort((a, b) => b.lastSeen - a.lastSeen)
-      if (mine.length && (mySessionId === null || !peers.some((p) => p.id === mySessionId))) mySessionId = mine[0].id
+      latestSave = payload.latestSave ?? null
+      rosterKnown = true
+      render()
+    } else if (payload.type === 'preset_saved' && payload.save) {
+      latestSave = payload.save
       render()
     }
-    // 'preset_saved' is also toasted by the backend; nothing extra needed here.
+  })
+  const unsubConnected = ctx.events.on('CONNECTED', (payload: any) => {
+    if (announced && payload?.userId) send('presence_hello')
+  })
+  const unsubPermissions = ctx.events.on('SPINDLE_PERMISSION_CHANGED', (payload: any) => {
+    if (!host || payload?.extensionId !== host.extensionInstallationId || payload.permission !== 'presets') return
+    tracker.destroy()
+    send('presence_heartbeat')
   })
 
   render()
@@ -294,6 +358,7 @@ export function setup(ctx: SpindleFrontendContext) {
     // First run on this browser: ask before announcing, so the other side
     // never sees "someone" flicker in.
     void askNickname(ctx, null).then((nick) => {
+      if (disposed) return
       nickname = nick; writeNickname(nick)
       render()
       send('presence_hello')
@@ -307,15 +372,22 @@ export function setup(ctx: SpindleFrontendContext) {
     if (now !== lastEditing) send('presence_heartbeat')
   }, 2000)
   const onHide = () => send('presence_bye')
+  const onShow = () => { if (announced) send('presence_hello') }
   window.addEventListener('pagehide', onHide)
+  window.addEventListener('pageshow', onShow)
 
   return () => {
+    disposed = true
     window.clearInterval(timer)
     window.clearInterval(editPoll)
     if (editTimer) window.clearTimeout(editTimer)
     tracker.destroy()
     window.removeEventListener('pagehide', onHide)
-    send('presence_bye')
+    window.removeEventListener('pageshow', onShow)
+    sizeObserver.disconnect()
+    try { ctx.sendToBackend({ type: 'presence_bye' }) } catch { /* host may already be inactive */ }
+    unsubConnected()
+    unsubPermissions()
     unsub()
     widget.destroy()
     removeStyle()
