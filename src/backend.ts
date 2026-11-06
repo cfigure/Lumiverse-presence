@@ -30,6 +30,7 @@ type Account = {
 
 const STALE_MS = 60_000          // drop a peer if no heartbeat for this long
 const PRUNE_EVERY_MS = 15_000
+const TOAST_MAX_LENGTH = 500     // Lumiverse caps toast messages at this length
 
 const accounts = new Map<string, Account>()
 
@@ -250,7 +251,15 @@ spindle.on('PRESET_CHANGED', (payload: any, userId?: string) => {
   const save = { presetId, name, revision, savedAt, detail }
   account.latestSave = save
   spindle.sendToFrontend({ type: 'preset_saved', save }, userId)
-  spindle.toast.info(changes ? detail : `Preset saved · ${detail.toLowerCase()}` — reload if you have it open., {
+  const toastDetail = changes ? detail : `Preset saved · ${detail.toLowerCase()}`
+  const reminder = 'Reload if you have it open.'
+  let toastMessage = `${toastDetail}. ${reminder}`
+  if (toastMessage.length > TOAST_MAX_LENGTH) {
+    const available = TOAST_MAX_LENGTH - reminder.length - 2
+    const boundary = toastDetail.lastIndexOf(' · ', available)
+    toastMessage = `${toastDetail.slice(0, boundary > 0 ? boundary : available).trimEnd()}… ${reminder}`
+  }
+  spindle.toast.info(toastMessage, {
     duration: summary.length ? 10000 : 7000,
     userId,
   })
